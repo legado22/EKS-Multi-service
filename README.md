@@ -8,7 +8,7 @@
 
 Production-ready, multi-environment Kubernetes infrastructure on AWS EKS with complete automation via GitHub Actions.
 
-## 📊 Infrastructure Overview
+##  Infrastructure Overview
 
 **Current Status:**
 - **Environments:** 1 (dev)
@@ -16,20 +16,20 @@ Production-ready, multi-environment Kubernetes infrastructure on AWS EKS with co
 - **CI/CD Pipelines:** 1 workflow (Terraform Dev)
 - **Cloud Provider:** AWS (us-east-1)
 - **Orchestration:** Amazon EKS + Terraform
-- **EKS Cluster:** ⚠️ **DISABLED** (cost savings mode)
+- **EKS Cluster:**  **DISABLED** (cost savings mode)
 
-## 💤 EKS Cluster Status
+##  EKS Cluster Status
 
 The EKS cluster is currently **disabled** to save costs (~$170+/month). The following infrastructure remains active:
 
 | Resource | Status | Est. Cost |
 |----------|--------|-----------|
-| VPC + Subnets | ✅ Active | ~$0 |
-| NAT Gateway (single) | ✅ Active | ~$32/month |
-| ECR Repositories | ✅ Active | < $1/month |
-| IAM Roles & Users | ✅ Active | $0 |
-| **EKS Cluster** | ❌ Disabled | $0 |
-| **EKS Node Group** | ❌ Disabled | $0 |
+| VPC + Subnets |  Active | ~$0 |
+| NAT Gateway (single) |  Active | ~$32/month |
+| ECR Repositories |  Active | < $1/month |
+| IAM Roles & Users |  Active | $0 |
+| **EKS Cluster** |  Disabled | $0 |
+| **EKS Node Group** |  Disabled | $0 |
 
 ### Redeploy EKS Cluster
 
@@ -76,7 +76,7 @@ To disable the EKS cluster and save costs:
 2. Set `allowed_read_principals = []` in the ECR module
 3. Commit and push - GitHub Actions will destroy the EKS resources
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### Prerequisites
 ```bash
@@ -110,7 +110,7 @@ terraform apply
 - Click "Run workflow"
 - Select: plan or apply
 
-## 🏗️ Infrastructure Environments
+##  Infrastructure Environments
 
 ### DEV Environment
 
@@ -132,13 +132,13 @@ vpc_cidr                       = 10.0.0.0/16
 **Estimated Cost:** ~$96/month
 
 
-## ⚙️ CI/CD Workflows
+##  CI/CD Workflows
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
 | Terraform Dev | Push to main, PR to main, Manual | Automatically deploys dev environment infrastructure |
 
-## 💰 Cost Breakdown
+##  Cost Breakdown
 
 ### Current Cost (EKS Disabled)
 | Resource | Estimated Monthly Cost |
@@ -158,7 +158,7 @@ vpc_cidr                       = 10.0.0.0/16
 
 *Note: Actual costs may vary based on data transfer, storage, and usage.*
 
-## 📦 Terraform Modules
+##  Terraform Modules
 
 ### VPC Module
 
@@ -220,7 +220,7 @@ vpc_cidr                       = 10.0.0.0/16
 - Security Group Rule
 
 <details>
-<summary>📥 Input Variables</summary>
+<summary> Input Variables</summary>
 
 | Variable | Type | Description | Default |
 |----------|------|-------------|---------|
@@ -270,7 +270,7 @@ vpc_cidr                       = 10.0.0.0/16
 - Custom Iam Policies
 
 <details>
-<summary>📥 Input Variables</summary>
+<summary> Input Variables</summary>
 
 | Variable | Type | Description | Default |
 |----------|------|-------------|---------|
@@ -285,7 +285,7 @@ vpc_cidr                       = 10.0.0.0/16
 </details>
 
 <details>
-<summary>📤 Outputs</summary>
+<summary> Outputs</summary>
 
 | Output | Description |
 |--------|-------------|
@@ -307,14 +307,14 @@ vpc_cidr                       = 10.0.0.0/16
 - **AWS Service Integration**: Compatible with EKS, VPC, and other AWS services
 
 
-## 📚 Additional Documentation
+##  Additional Documentation
 
 - [Terraform Modules](terraform/modules/README.md)
 - [Deployment Guide](docs/deployment-guide.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [AWS EKS Best Practices](https://aws.github.io/aws-eks-best-practices/)
 
-## 🤝 Contributing
+##  Contributing
 
 1. Fork the repository
 2. Create feature branch (`git checkout -b feature/amazing-feature`)
@@ -322,11 +322,11 @@ vpc_cidr                       = 10.0.0.0/16
 4. Push to branch (`git push origin feature/amazing-feature`)
 5. Open Pull Request
 
-## 📄 License
+##  License
 
 This project is licensed under the MIT License - see [LICENSE](LICENSE) file.
 
-## 🙏 Acknowledgments
+##  Acknowledgments
 
 - AWS EKS team for comprehensive documentation
 - Terraform community for infrastructure patterns
@@ -334,4 +334,4 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) file.
 
 ---
 
-**🤖 This README is automatically generated.** To update, modify infrastructure code and push to main branch.
+** This README is automatically generated.** To update, modify infrastructure code and push to main branch.
