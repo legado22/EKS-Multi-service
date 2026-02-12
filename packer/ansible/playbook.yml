@@ -1,0 +1,20 @@
+---
+- name: Build AAP Pre-Baked AMI
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    aap_admin_password: "changeme"
+
+  roles:
+    - role: rhsm
+      tags: [rhsm]
+    - role: aap-prereqs
+      tags: [prereqs]
+    - role: aap-install
+      tags: [install]
+    - role: aap-firstboot
+      tags: [firstboot]
+    - role: cleanup
+      tags: [cleanup]

@@ -1,0 +1,18 @@
+[Unit]
+Description=AAP First-Boot Hostname Reconfiguration
+# Works on AWS (cloud-init), vCenter (open-vm-tools), and bare metal
+# cloud-init.service sets hostname; cloud-final.service causes ordering cycle with multi-user.target
+After=network-online.target cloud-init.service systemd-user-sessions.service
+Wants=network-online.target
+ConditionPathExists=!{{ aap_firstboot_marker }}
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aap-firstboot.sh
+TimeoutStartSec=3600
+StandardOutput=journal+console
+StandardError=journal+console
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

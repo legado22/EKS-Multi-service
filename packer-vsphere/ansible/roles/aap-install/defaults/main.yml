@@ -1,0 +1,8 @@
+---
+aap_admin_password: "changeme"
+aap_pg_password: "aap_pg_secure_default"
+
+aap_setup_dir: /opt/aap-setup
+
+# Non-root user for AAP containerized install (rootless Podman requirement)
+aap_install_user: aapuser

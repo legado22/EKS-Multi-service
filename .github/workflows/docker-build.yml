@@ -1,0 +1,205 @@
+name: 'Build and Push to ECR'
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'services/**'
+      - '.github/workflows/docker-build.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'services/**'
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to build (or "all" for all services)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - frontend
+          - api-gateway
+          - auth-service
+          - product-service
+          - order-service
+          - payment-service
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  PROJECT_NAME: eks-multi-service
+
+jobs:
+  # Determine which services need to be built
+  detect-changes:
+    name: 'Detect Changed Services'
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.filter.outputs.changes }}
+      build_all: ${{ steps.check.outputs.build_all }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      
+      - name: Check if building all services
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.service }}" == "all" ]]; then
+            echo "build_all=true" >> $GITHUB_OUTPUT
+          else
+            echo "build_all=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Detect changed services
+        uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            frontend:
+              - 'services/frontend/**'
+            api-gateway:
+              - 'services/api-gateway/**'
+            auth-service:
+              - 'services/auth-service/**'
+            product-service:
+              - 'services/product-service/**'
+            order-service:
+              - 'services/order-service/**'
+            payment-service:
+              - 'services/payment-service/**'
+
+  # Build and push Docker images
+  build-and-push:
+    name: 'Build & Push'
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.services != '[]' || needs.detect-changes.outputs.build_all == 'true'
+    
+    permissions:
+      id-token: write  # Required for OIDC
+      contents: read
+    
+    strategy:
+      matrix:
+        service: 
+          - frontend
+          - api-gateway
+          - auth-service
+          - product-service
+          - order-service
+          - payment-service
+      fail-fast: false
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Check if service should be built
+        id: should_build
+        run: |
+          if [[ "${{ needs.detect-changes.outputs.build_all }}" == "true" ]]; then
+            echo "build=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.service }}" == "${{ matrix.service }}" ]]; then
+            echo "build=true" >> $GITHUB_OUTPUT
+          elif echo '${{ needs.detect-changes.outputs.services }}' | jq -e 'index("${{ matrix.service }}")' > /dev/null; then
+            echo "build=true" >> $GITHUB_OUTPUT
+          else
+            echo "build=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Configure AWS Credentials (OIDC)
+        if: steps.should_build.outputs.build == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Docker-Build-${{ matrix.service }}
+      
+      - name: Login to Amazon ECR
+        if: steps.should_build.outputs.build == 'true'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Set up Docker Buildx
+        if: steps.should_build.outputs.build == 'true'
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Extract metadata
+        if: steps.should_build.outputs.build == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.PROJECT_NAME }}/${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+      
+      - name: Build and push Docker image
+        if: steps.should_build.outputs.build == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service }}
+          file: ./services/${{ matrix.service }}/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+      
+      - name: Image vulnerability scan
+        if: steps.should_build.outputs.build == 'true' && github.event_name != 'pull_request'
+        run: |
+          # Wait for ECR scan to complete (automatic on push)
+          sleep 10
+          
+          # Get scan findings
+          aws ecr describe-image-scan-findings \
+            --repository-name ${{ env.PROJECT_NAME }}/${{ matrix.service }} \
+            --image-id imageTag=latest \
+            --region ${{ env.AWS_REGION }} || echo "Scan still in progress"
+      
+      - name: Summary
+        if: steps.should_build.outputs.build == 'true'
+        run: |
+          echo "### 🐳 Docker Image Built Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** ${{ env.ECR_REGISTRY }}/${{ env.PROJECT_NAME }}/${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # Notify on completion
+  notify:
+    name: 'Notify Completion'
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: always()
+    
+    steps:
+      - name: Build Status
+        run: |
+          if [[ "${{ needs.build-and-push.result }}" == "success" ]]; then
+            echo "✅ All Docker images built and pushed successfully!"
+          else
+            echo "❌ Some Docker builds failed!"
+            exit 1
+          fi

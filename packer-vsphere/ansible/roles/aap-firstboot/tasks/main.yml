@@ -1,0 +1,53 @@
+---
+# Save the build-time hostname so the firstboot script can detect changes
+- name: Get current FQDN (build-time hostname)
+  ansible.builtin.command: hostname -f
+  register: build_fqdn
+  changed_when: false
+
+- name: Save build-time hostname for firstboot comparison
+  ansible.builtin.copy:
+    content: "{{ build_fqdn.stdout }}"
+    dest: "{{ aap_build_hostname_file }}"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Display build-time hostname
+  ansible.builtin.debug:
+    msg: "Build-time hostname saved: {{ build_fqdn.stdout }}"
+
+# Install the firstboot reconfiguration script
+- name: Template AAP firstboot reconfiguration script
+  ansible.builtin.template:
+    src: aap-firstboot.sh.j2
+    dest: /usr/local/bin/aap-firstboot.sh
+    owner: root
+    group: root
+    mode: '0700'
+
+# Install and enable the systemd oneshot service
+- name: Template AAP firstboot systemd service
+  ansible.builtin.template:
+    src: aap-firstboot.service.j2
+    dest: /etc/systemd/system/aap-firstboot.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Enable AAP firstboot service
+  ansible.builtin.systemd:
+    name: aap-firstboot
+    enabled: true
+    daemon_reload: true
+
+- name: Display firstboot setup summary
+  ansible.builtin.debug:
+    msg: |
+      AAP firstboot reconfiguration service installed:
+      - Script: /usr/local/bin/aap-firstboot.sh
+      - Service: aap-firstboot.service (oneshot, runs on first boot)
+      - Marker: {{ aap_firstboot_marker }} (created after successful reconfiguration)
+      - Build hostname: {{ build_fqdn.stdout }} (saved to {{ aap_build_hostname_file }})
+      On first boot, if the hostname differs from the build-time hostname,
+      the service will re-run the AAP installer to regenerate TLS certs and config.

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: execute-tech-academy
+data:
+  AWS_REGION: "us-east-1"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  AUTH_SERVICE_URL: "http://auth-service:8001"
+  PRODUCT_SERVICE_URL: "http://product-service:8002"
+  ORDER_SERVICE_URL: "http://order-service:8003"
+  PAYMENT_SERVICE_URL: "http://payment-service:8004"
+  RATE_LIMIT_PER_MINUTE: "60"
+  CIRCUIT_BREAKER_ENABLED: "true"

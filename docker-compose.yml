@@ -1,0 +1,181 @@
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: execute_tech_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for API Gateway caching
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Auth Service
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    container_name: auth-service
+    environment:
+      DATABASE_URL: postgresql://admin:admin123@postgres:5432/auth_db
+      SECRET_KEY: your-secret-key-change-in-production-min-32-characters-long
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Product Service
+  product-service:
+    build:
+      context: ./services/product-service
+      dockerfile: Dockerfile
+    container_name: product-service
+    environment:
+      DATABASE_URL: postgresql://admin:admin123@postgres:5432/product_db
+      SECRET_KEY: your-secret-key-change-in-production-min-32-characters-long
+      AUTH_SERVICE_URL: http://auth-service:8001
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Order Service
+  order-service:
+    build:
+      context: ./services/order-service
+      dockerfile: Dockerfile
+    container_name: order-service
+    environment:
+      DATABASE_URL: postgresql://admin:admin123@postgres:5432/order_db
+      SECRET_KEY: your-secret-key-change-in-production-min-32-characters-long
+      AUTH_SERVICE_URL: http://auth-service:8001
+      PRODUCT_SERVICE_URL: http://product-service:8002
+      PAYMENT_SERVICE_URL: http://payment-service:8004
+    ports:
+      - "8003:8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      product-service:
+        condition: service_started
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Payment Service
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: payment-service
+    environment:
+      DATABASE_URL: postgresql://admin:admin123@postgres:5432/payment_db
+      SECRET_KEY: your-secret-key-change-in-production-min-32-characters-long
+      ORDER_SERVICE_URL: http://order-service:8003
+      AUTH_SERVICE_URL: http://auth-service:8001
+      # Payment gateway credentials (use test keys)
+      PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY:-sk_test_}
+      PAYSTACK_PUBLIC_KEY: ${PAYSTACK_PUBLIC_KEY:-pk_test_}
+    ports:
+      - "8004:8004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      order-service:
+        condition: service_started
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    environment:
+      SECRET_KEY: your-secret-key-change-in-production-min-32-characters-long
+      AUTH_SERVICE_URL: http://auth-service:8001
+      PRODUCT_SERVICE_URL: http://product-service:8002
+      ORDER_SERVICE_URL: http://order-service:8003
+      PAYMENT_SERVICE_URL: http://payment-service:8004
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      product-service:
+        condition: service_started
+      order-service:
+        condition: service_started
+      payment-service:
+        condition: service_started
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Frontend
+  frontend:
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+
+

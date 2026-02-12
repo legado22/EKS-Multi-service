@@ -1,0 +1,271 @@
+---
+# Containerized AAP Installation (Podman-based)
+# AAP 2.6 containerized installer MUST run as a non-root user (rootless Podman).
+# Tasks that need root use the default become: true from the playbook.
+# The installer and podman tasks use become: false to run as the SSH user (aapuser).
+
+- name: Display installation method
+  ansible.builtin.debug:
+    msg: "Installing AAP using containerized (Podman) deployment method via ansible-playbook"
+
+- name: Verify AAP bundle was uploaded to the build VM
+  ansible.builtin.stat:
+    path: /tmp/aap-bundle.tar.gz
+  register: bundle_file
+
+- name: Fail if bundle not found
+  ansible.builtin.fail:
+    msg: "AAP bundle not found at /tmp/aap-bundle.tar.gz. Packer file provisioner should have uploaded it."
+  when: not bundle_file.stat.exists
+
+- name: Create AAP setup directory
+  ansible.builtin.file:
+    path: "{{ aap_setup_dir }}"
+    state: directory
+    owner: "{{ aap_install_user }}"
+    group: "{{ aap_install_user }}"
+    mode: '0755'
+
+- name: Extract AAP setup bundle
+  ansible.builtin.unarchive:
+    src: /tmp/aap-bundle.tar.gz
+    dest: "{{ aap_setup_dir }}"
+    remote_src: yes
+    owner: "{{ aap_install_user }}"
+    group: "{{ aap_install_user }}"
+
+- name: Find the extracted installer directory (contains ansible.cfg)
+  ansible.builtin.find:
+    paths: "{{ aap_setup_dir }}"
+    patterns: "ansible.cfg"
+    recurse: true
+    file_type: file
+    depth: 2
+  register: ansible_cfg_search
+
+- name: Fail if installer directory not found
+  ansible.builtin.fail:
+    msg: |
+      Could not find ansible.cfg in extracted bundle under {{ aap_setup_dir }}.
+      The containerized bundle may be corrupt or incomplete.
+  when: ansible_cfg_search.files | length == 0
+
+- name: Set installer directory path
+  ansible.builtin.set_fact:
+    aap_installer_dir: "{{ ansible_cfg_search.files[0].path | dirname }}"
+
+- name: Display installer directory
+  ansible.builtin.debug:
+    msg: "Using AAP installer directory: {{ aap_installer_dir }}"
+
+- name: List installer directory contents
+  ansible.builtin.command: ls -la {{ aap_installer_dir }}
+  register: bundle_contents
+  changed_when: false
+
+- name: Display bundle contents
+  ansible.builtin.debug:
+    msg: "{{ bundle_contents.stdout_lines }}"
+
+# Verify the bundle directory exists (required for offline install)
+- name: Check bundle directory exists
+  ansible.builtin.stat:
+    path: "{{ aap_installer_dir }}/bundle"
+  register: bundle_dir_check
+
+- name: Display bundle directory status
+  ansible.builtin.debug:
+    msg: "Bundle directory {{ aap_installer_dir }}/bundle exists: {{ bundle_dir_check.stat.exists | default(false) }}"
+
+- name: List bundle directory contents
+  ansible.builtin.command: ls -la {{ aap_installer_dir }}/bundle
+  register: bundle_dir_contents
+  changed_when: false
+  when: bundle_dir_check.stat.exists | default(false)
+
+- name: Display bundle directory contents
+  ansible.builtin.debug:
+    msg: "{{ bundle_dir_contents.stdout_lines }}"
+  when: bundle_dir_contents is not skipped
+
+- name: Ensure FQDN is resolvable (required by AAP installer)
+  ansible.builtin.shell: |
+    FQDN=$(hostname -f 2>/dev/null || hostname)
+    if [ "$FQDN" = "localhost" ] || [ -z "$FQDN" ]; then
+      HOSTNAME=$(hostname -s)
+      hostnamectl set-hostname "${HOSTNAME}.localdomain"
+      echo "127.0.0.1 ${HOSTNAME}.localdomain ${HOSTNAME}" >> /etc/hosts
+    fi
+    hostname -f
+  register: fqdn_result
+  changed_when: false
+
+- name: Display FQDN
+  ansible.builtin.debug:
+    msg: "Host FQDN: {{ fqdn_result.stdout }}"
+
+# Re-gather facts after potential FQDN change so ansible_fqdn is accurate
+- name: Refresh facts after FQDN setup
+  ansible.builtin.setup:
+    filter: ansible_fqdn
+
+- name: Display ansible_fqdn fact
+  ansible.builtin.debug:
+    msg: "ansible_fqdn = {{ ansible_fqdn }}"
+
+# Configure sudo for the install user (AAP installer uses become internally)
+- name: Ensure install user has passwordless sudo
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ aap_install_user }}"
+    content: "{{ aap_install_user }} ALL=(ALL) NOPASSWD: ALL"
+    mode: '0440'
+    validate: 'visudo -cf %s'
+
+# Enable lingering so rootless Podman systemd services persist after logout
+- name: Enable loginctl lingering for install user
+  ansible.builtin.command: loginctl enable-linger {{ aap_install_user }}
+  changed_when: true
+
+- name: Template the AAP containerized installer inventory
+  ansible.builtin.template:
+    src: inventory.j2
+    dest: "{{ aap_installer_dir }}/inventory"
+    owner: "{{ aap_install_user }}"
+    group: "{{ aap_install_user }}"
+    mode: '0600'
+
+# Show the FULL rendered inventory for debugging (will be cleaned up later)
+- name: Display full rendered inventory
+  ansible.builtin.command: cat {{ aap_installer_dir }}/inventory
+  register: rendered_inventory
+  changed_when: false
+
+- name: Show rendered inventory
+  ansible.builtin.debug:
+    msg: "{{ rendered_inventory.stdout_lines }}"
+
+# Pre-flight checks before running installer
+- name: Pre-flight - verify ansible-core is available
+  ansible.builtin.command: ansible --version
+  become: false
+  register: ansible_version_check
+  changed_when: false
+
+- name: Display ansible version
+  ansible.builtin.debug:
+    msg: "{{ ansible_version_check.stdout_lines }}"
+
+- name: Pre-flight - verify podman is available
+  ansible.builtin.command: podman --version
+  become: false
+  register: podman_version_check
+  changed_when: false
+
+- name: Display podman version
+  ansible.builtin.debug:
+    msg: "{{ podman_version_check.stdout }}"
+
+- name: Pre-flight - check who will run the installer
+  ansible.builtin.command: whoami
+  become: false
+  register: whoami_check
+  changed_when: false
+
+- name: Display installer user
+  ansible.builtin.debug:
+    msg: "Installer will run as: {{ whoami_check.stdout }}"
+
+- name: Pre-flight - verify ansible.cfg exists
+  ansible.builtin.command: cat {{ aap_installer_dir }}/ansible.cfg
+  register: ansible_cfg_content
+  changed_when: false
+
+- name: Display ansible.cfg
+  ansible.builtin.debug:
+    msg: "{{ ansible_cfg_content.stdout_lines }}"
+
+# Run installer as the non-root SSH user (become: false skips play-level become: true)
+- name: Run AAP containerized installer via ansible-playbook
+  ansible.builtin.shell: >
+    set -o pipefail &&
+    ansible-playbook -i inventory ansible.containerized_installer.install -v
+    2>&1 | tee /tmp/aap-setup.log
+  args:
+    chdir: "{{ aap_installer_dir }}"
+    executable: /bin/bash
+  environment:
+    ANSIBLE_CONFIG: "{{ aap_installer_dir }}/ansible.cfg"
+    HOME: "/home/{{ aap_install_user }}"
+  become: false
+  async: 3600
+  poll: 60
+  register: aap_setup_result
+  failed_when: false
+
+- name: Read installer log (always)
+  ansible.builtin.command: tail -500 /tmp/aap-setup.log
+  register: setup_log
+  changed_when: false
+  ignore_errors: true
+
+- name: Display installer log
+  ansible.builtin.debug:
+    msg: "{{ setup_log.stdout_lines }}"
+  when: setup_log.stdout_lines is defined
+
+- name: Fail if installer returned non-zero
+  ansible.builtin.fail:
+    msg: "AAP containerized installer failed with exit code {{ aap_setup_result.rc }}"
+  when: aap_setup_result.rc is defined and aap_setup_result.rc != 0
+
+- name: Wait for services to stabilize
+  ansible.builtin.pause:
+    seconds: 30
+
+# Check containers as the install user (rootless Podman runs under this user)
+- name: List all podman containers
+  ansible.builtin.command: podman ps -a --format "{{ '{{' }}.Names{{ '}}' }} {{ '{{' }}.Status{{ '}}' }}"
+  become: false
+  register: podman_containers
+  changed_when: false
+
+- name: Display running containers
+  ansible.builtin.debug:
+    msg: "{{ podman_containers.stdout_lines }}"
+
+- name: Check podman images loaded from bundle
+  ansible.builtin.command: podman images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}"
+  become: false
+  register: podman_images
+  changed_when: false
+
+- name: Display podman images
+  ansible.builtin.debug:
+    msg: "{{ podman_images.stdout_lines }}"
+
+- name: Display AAP installation summary
+  ansible.builtin.debug:
+    msg: |
+      AAP 2.6 Containerized Installation Summary:
+      - Podman containers: {{ podman_containers.stdout_lines | length }}
+      - Podman images: {{ podman_images.stdout_lines | length }}
+      - Container details:
+      {{ podman_containers.stdout }}
+
+- name: Fail if no containers were created
+  ansible.builtin.fail:
+    msg: |
+      AAP installer completed with rc=0 but no podman containers were created.
+      This means the installer ran but did not actually install anything.
+      Check the installer log above for details.
+  when: podman_containers.stdout_lines | length == 0
+
+- name: Remove installer inventory file (contains passwords)
+  ansible.builtin.file:
+    path: "{{ aap_installer_dir }}/inventory"
+    state: absent
+
+- name: Clean up bundle file
+  ansible.builtin.file:
+    path: /tmp/aap-bundle.tar.gz
+    state: absent

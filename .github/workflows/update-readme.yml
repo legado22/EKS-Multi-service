@@ -1,0 +1,61 @@
+name: 'Update Documentation'
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'eks-multi-service/terraform/**'
+      - 'eks-multi-service/.github/workflows/**'
+      - 'eks-multi-service/bootstrap/**'
+      - 'eks-multi-service/scripts/**'
+  workflow_dispatch:  # Manual trigger option
+
+permissions:
+  contents: write  # Needed to commit back to repo
+
+jobs:
+  update-readme:
+    name: 'Auto-Update README'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Get full history for better changelog
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install Dependencies
+        run: |
+          pip install pyyaml jinja2
+      
+      - name: Generate Documentation
+        run: |
+          python eks-multi-service/scripts/generate-readme.py
+      
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet eks-multi-service/README.md; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Commit and Push Changes
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add eks-multi-service/README.md
+          git commit -m "docs: Auto-update README documentation [skip ci]"
+          git push
+      
+      - name: No Changes Detected
+        if: steps.check_changes.outputs.changed == 'false'
+        run: echo "✓ README is already up to date"

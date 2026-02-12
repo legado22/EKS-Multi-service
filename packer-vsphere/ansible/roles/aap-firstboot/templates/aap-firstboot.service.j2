@@ -1,0 +1,17 @@
+[Unit]
+Description=AAP First-Boot Hostname Reconfiguration
+# VMware guest customization or cloud-init sets hostname before this service runs
+After=network-online.target systemd-user-sessions.service
+Wants=network-online.target
+ConditionPathExists=!{{ aap_firstboot_marker }}
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aap-firstboot.sh
+TimeoutStartSec=3600
+StandardOutput=journal+console
+StandardError=journal+console
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

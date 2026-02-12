@@ -1,0 +1,191 @@
+#!/bin/bash
+# AAP First-Boot Reconfiguration Script
+# Detects hostname change from build-time and re-runs AAP installer
+# to regenerate TLS certificates and update configuration.
+#
+# Platform-agnostic: works on AWS, vCenter/VMware, bare metal, or any
+# environment where the hostname may differ from the build-time value.
+# Uses only standard Linux commands (hostname, hostnamectl, su).
+
+set -euo pipefail
+
+MARKER="{{ aap_firstboot_marker }}"
+LOG="{{ aap_firstboot_log }}"
+AAP_USER="{{ aap_install_user }}"
+SETUP_DIR="{{ aap_setup_dir }}"
+ADMIN_PASS="{{ aap_admin_password }}"
+PG_PASS="{{ aap_pg_password }}"
+BUILD_HOSTNAME_FILE="{{ aap_build_hostname_file }}"
+
+exec > >(tee -a "$LOG") 2>&1
+echo "=== AAP First-Boot Reconfiguration: $(date) ==="
+
+# Already configured?
+if [ -f "$MARKER" ]; then
+    echo "AAP already configured on this host. Exiting."
+    exit 0
+fi
+
+# Ensure FQDN is resolvable
+FQDN=$(hostname -f 2>/dev/null || hostname)
+if [ "$FQDN" = "localhost" ] || [ -z "$FQDN" ]; then
+    HOSTNAME_SHORT=$(hostname -s)
+    hostnamectl set-hostname "${HOSTNAME_SHORT}.localdomain"
+    echo "127.0.0.1 ${HOSTNAME_SHORT}.localdomain ${HOSTNAME_SHORT}" >> /etc/hosts
+    FQDN="${HOSTNAME_SHORT}.localdomain"
+fi
+echo "Current FQDN: $FQDN"
+
+# Compare with build-time hostname
+if [ -f "$BUILD_HOSTNAME_FILE" ]; then
+    BUILD_HOSTNAME=$(cat "$BUILD_HOSTNAME_FILE")
+    echo "Build-time hostname: $BUILD_HOSTNAME"
+    if [ "$FQDN" = "$BUILD_HOSTNAME" ]; then
+        echo "Hostname unchanged from build. Skipping reconfiguration."
+        touch "$MARKER"
+        exit 0
+    fi
+    echo "Hostname changed: $BUILD_HOSTNAME -> $FQDN"
+else
+    echo "No build-time hostname recorded. Proceeding with reconfiguration."
+fi
+
+# Find the installer directory (contains ansible.cfg)
+INSTALLER_DIR=$(find "$SETUP_DIR" -maxdepth 2 -name "ansible.cfg" -type f -print -quit | xargs dirname 2>/dev/null || true)
+if [ -z "$INSTALLER_DIR" ]; then
+    echo "ERROR: Cannot find AAP installer directory under $SETUP_DIR"
+    exit 1
+fi
+echo "Installer directory: $INSTALLER_DIR"
+
+# Verify bundle directory exists
+if [ ! -d "${INSTALLER_DIR}/bundle" ]; then
+    echo "WARNING: Bundle directory not found at ${INSTALLER_DIR}/bundle"
+    echo "The installer may still work if images are already loaded in Podman."
+fi
+
+# Wait for user runtime directory (rootless Podman requirement)
+AAP_UID=$(id -u "$AAP_USER")
+RUNTIME_DIR="/run/user/${AAP_UID}"
+echo "Waiting for user runtime directory ${RUNTIME_DIR}..."
+for i in $(seq 1 30); do
+    if [ -d "$RUNTIME_DIR" ]; then
+        echo "User runtime directory ready."
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "WARNING: User runtime directory not found after 30s. Creating it."
+        mkdir -p "$RUNTIME_DIR"
+        chown "${AAP_USER}:${AAP_USER}" "$RUNTIME_DIR"
+        chmod 700 "$RUNTIME_DIR"
+    fi
+    sleep 1
+done
+
+# === Full cleanup: reset AAP to pre-install state (keeps container images) ===
+AAP_HOME="/home/${AAP_USER}/aap"
+echo "Resetting AAP deployment to clean state for new hostname..."
+
+# Stop all AAP systemd user services
+echo "Stopping AAP systemd user services..."
+su - "${AAP_USER}" -c "
+    export XDG_RUNTIME_DIR=/run/user/${AAP_UID}
+    # List and stop all AAP-related user services
+    systemctl --user stop 'automation-*' 'receptor*' 'redis*' 'postgresql*' 2>/dev/null || true
+    # Stop any remaining podman containers
+    podman stop -a -t 10 2>/dev/null || true
+    # Remove all containers (images are preserved)
+    podman rm -a -f 2>/dev/null || true
+    # Remove all volumes (old certs, DB data, etc.)
+    podman volume rm -a -f 2>/dev/null || true
+    # Disable AAP user services so installer recreates them
+    systemctl --user disable 'automation-*' 'receptor*' 'redis*' 'postgresql*' 2>/dev/null || true
+    systemctl --user daemon-reload 2>/dev/null || true
+" || true
+
+# Remove AAP data directory (TLS certs, configs, etc.)
+if [ -d "${AAP_HOME}" ]; then
+    echo "Removing AAP data directory ${AAP_HOME}..."
+    rm -rf "${AAP_HOME}"
+fi
+
+echo "Clean state achieved. Container images preserved for fast reinstall."
+
+# Generate new inventory with current hostname
+echo "Generating inventory for hostname: $FQDN"
+cat > "${INSTALLER_DIR}/inventory" <<INVENTORY
+[automationgateway]
+${FQDN}
+
+[automationcontroller]
+${FQDN}
+
+[automationhub]
+${FQDN}
+
+[automationeda]
+${FQDN}
+
+[database]
+${FQDN}
+
+[all:vars]
+ansible_connection=local
+ansible_host=${FQDN}
+
+postgresql_admin_username=postgres
+postgresql_admin_password='${PG_PASS}'
+
+bundle_install=true
+bundle_dir='${INSTALLER_DIR}/bundle'
+
+redis_mode=standalone
+
+gateway_admin_password='${ADMIN_PASS}'
+gateway_pg_host=${FQDN}
+gateway_pg_password='${PG_PASS}'
+
+controller_admin_password='${ADMIN_PASS}'
+controller_pg_host=${FQDN}
+controller_pg_password='${PG_PASS}'
+controller_percent_memory_capacity=0.5
+
+hub_admin_password='${ADMIN_PASS}'
+hub_pg_host=${FQDN}
+hub_pg_password='${PG_PASS}'
+hub_seed_collections=false
+
+eda_admin_password='${ADMIN_PASS}'
+eda_pg_host=${FQDN}
+eda_pg_password='${PG_PASS}'
+INVENTORY
+
+chown "${AAP_USER}:${AAP_USER}" "${INSTALLER_DIR}/inventory"
+chmod 600 "${INSTALLER_DIR}/inventory"
+
+# Re-run AAP installer as the install user (rootless Podman requirement)
+echo "Running AAP installer to reconfigure for new hostname..."
+set +e
+su - "${AAP_USER}" -c "
+    export XDG_RUNTIME_DIR=/run/user/${AAP_UID}
+    export ANSIBLE_CONFIG='${INSTALLER_DIR}/ansible.cfg'
+    cd '${INSTALLER_DIR}'
+    ansible-playbook -i inventory ansible.containerized_installer.install -v 2>&1
+" | tee -a "$LOG"
+INSTALL_RC=${PIPESTATUS[0]}
+set -e
+
+if [ "$INSTALL_RC" -ne 0 ]; then
+    echo "ERROR: AAP installer failed with exit code $INSTALL_RC"
+    rm -f "${INSTALLER_DIR}/inventory"
+    exit 1
+fi
+
+echo "AAP installer completed successfully."
+
+# Clean up inventory (contains passwords)
+rm -f "${INSTALLER_DIR}/inventory"
+
+# Mark as configured
+touch "$MARKER"
+echo "=== AAP First-Boot Reconfiguration Complete: $(date) ==="

@@ -1,0 +1,40 @@
+# =============================================================================
+# vSphere Variables - COPY THIS FILE AND FILL IN YOUR VALUES
+# =============================================================================
+# cp vsphere.auto.pkrvars.hcl.example vsphere.auto.pkrvars.hcl
+# Then edit vsphere.auto.pkrvars.hcl with your environment-specific values.
+#
+# NEVER commit vsphere.auto.pkrvars.hcl to version control (it's in .gitignore).
+# =============================================================================
+
+# --- vCenter Connection ---
+vcenter_server     = "vcenter.example.com"
+vcenter_username   = "administrator@vsphere.local"
+vcenter_password   = "your-vcenter-password"
+vcenter_insecure   = false
+vcenter_datacenter = "DC1"
+vcenter_cluster    = "Cluster-01"
+vcenter_datastore  = "datastore1"
+vcenter_folder     = "Templates/AAP"
+vcenter_network    = "VM Network"
+
+# --- RHEL 9 ISO (uploaded to vCenter datastore) ---
+iso_paths = ["[datastore1] ISO/rhel-9.4-x86_64-dvd.iso"]
+
+# --- VM Hardware ---
+vm_cpus         = 8       # Minimum 8 for full AAP stack
+vm_ram_mb       = 32768   # Minimum 32GB
+vm_disk_size_mb = 204800  # 200GB
+vm_name_prefix  = "aap-rhel9-template"
+
+# --- OS Credentials (must match kickstart) ---
+ssh_username = "aapuser"
+ssh_password = "CHANGE_ME_TO_A_STRONG_PASSWORD"
+
+# --- Red Hat Subscription ---
+rhsm_username = "your-redhat-account@example.com"
+rhsm_password = "your-rhsm-password"
+
+# --- AAP ---
+aap_admin_password    = "changeme"
+aap_bundle_local_path = "/path/to/ansible-automation-platform-containerized-setup-bundle-2.6-5-x86_64.tar.gz"

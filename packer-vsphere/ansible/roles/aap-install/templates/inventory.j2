@@ -1,0 +1,62 @@
+# Ansible Automation Platform 2.6 Containerized Installer Inventory
+# Growth topology (all-in-one) on single host
+# Docs: https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.6/html/containerized_installation
+
+# Platform gateway
+[automationgateway]
+{{ ansible_fqdn }}
+
+# Automation controller
+[automationcontroller]
+{{ ansible_fqdn }}
+
+# Automation hub
+[automationhub]
+{{ ansible_fqdn }}
+
+# Event-Driven Ansible controller
+[automationeda]
+{{ ansible_fqdn }}
+
+# Database (local PostgreSQL on same host)
+[database]
+{{ ansible_fqdn }}
+
+[all:vars]
+
+# Ansible connection
+ansible_connection=local
+ansible_host={{ ansible_fqdn }}
+
+# Common variables
+postgresql_admin_username=postgres
+postgresql_admin_password='{{ aap_pg_password }}'
+
+# Bundle (offline) installation - no registry credentials needed
+bundle_install=true
+bundle_dir='{{ aap_installer_dir }}/bundle'
+
+# Redis standalone mode (growth topology, no [redis] group needed)
+redis_mode=standalone
+
+# Platform gateway
+gateway_admin_password='{{ aap_admin_password }}'
+gateway_pg_host={{ ansible_fqdn }}
+gateway_pg_password='{{ aap_pg_password }}'
+
+# Automation controller
+controller_admin_password='{{ aap_admin_password }}'
+controller_pg_host={{ ansible_fqdn }}
+controller_pg_password='{{ aap_pg_password }}'
+controller_percent_memory_capacity=0.5
+
+# Automation hub
+hub_admin_password='{{ aap_admin_password }}'
+hub_pg_host={{ ansible_fqdn }}
+hub_pg_password='{{ aap_pg_password }}'
+hub_seed_collections=false
+
+# Event-Driven Ansible controller
+eda_admin_password='{{ aap_admin_password }}'
+eda_pg_host={{ ansible_fqdn }}
+eda_pg_password='{{ aap_pg_password }}'

@@ -1,0 +1,117 @@
+---
+# Register with Red Hat Subscription Manager and enable AAP repos
+
+- name: Check if system is already registered
+  ansible.builtin.command: subscription-manager status
+  register: rhsm_status
+  changed_when: false
+  failed_when: false
+
+- name: Display current RHSM status
+  ansible.builtin.debug:
+    msg: "{{ rhsm_status.stdout_lines }}"
+
+- name: Unregister from RHSM if already registered
+  community.general.redhat_subscription:
+    state: absent
+  when: rhsm_status.rc == 0
+  ignore_errors: true
+
+- name: Register with Red Hat Subscription Manager
+  community.general.redhat_subscription:
+    state: present
+    username: "{{ rhsm_username }}"
+    password: "{{ rhsm_password }}"
+    auto_attach: true
+  register: rhsm_register
+  retries: 3
+  delay: 10
+  until: rhsm_register is succeeded
+
+- name: Display registration result
+  ansible.builtin.debug:
+    msg: "System successfully registered to RHSM"
+
+- name: Check subscription status
+  ansible.builtin.command: subscription-manager status
+  register: sub_status
+  changed_when: false
+
+- name: Display subscription status
+  ansible.builtin.debug:
+    msg: "{{ sub_status.stdout_lines }}"
+
+- name: List available repositories
+  ansible.builtin.command: subscription-manager repos --list
+  register: available_repos
+  changed_when: false
+
+- name: Display available repositories
+  ansible.builtin.debug:
+    msg: "{{ available_repos.stdout_lines[:50] }}"
+
+- name: Check if Simple Content Access (SCA) is enabled
+  ansible.builtin.shell: subscription-manager status | grep -i "content access mode"
+  register: sca_check
+  changed_when: false
+  failed_when: false
+
+- name: Display content access mode
+  ansible.builtin.debug:
+    msg: "{{ sca_check.stdout }}"
+  when: sca_check.rc == 0
+
+# With SCA, repos are automatically enabled. Only try to enable if not using SCA.
+- name: Enable repositories (non-SCA accounts only)
+  community.general.rhsm_repository:
+    name: "{{ item }}"
+    state: enabled
+  loop:
+    - rhel-9-for-x86_64-baseos-rpms
+    - rhel-9-for-x86_64-appstream-rpms
+    - ansible-automation-platform-2.6-for-rhel-9-x86_64-rpms
+  when: "'simple content access' not in sca_check.stdout | lower"
+  ignore_errors: true
+  register: repo_enable
+
+- name: Clean DNF cache
+  ansible.builtin.command: dnf clean all
+  changed_when: true
+
+- name: Update DNF cache
+  ansible.builtin.dnf:
+    update_cache: true
+
+- name: List enabled repositories
+  ansible.builtin.command: dnf repolist enabled
+  register: enabled_repos
+  changed_when: false
+
+- name: Display enabled repositories
+  ansible.builtin.debug:
+    msg: "{{ enabled_repos.stdout_lines }}"
+
+- name: Search for AAP packages
+  ansible.builtin.command: dnf search ansible-automation-platform
+  register: aap_search
+  changed_when: false
+  failed_when: false
+
+- name: Display AAP package search results
+  ansible.builtin.debug:
+    msg: "{{ aap_search.stdout_lines }}"
+
+- name: Check for AAP installer package
+  ansible.builtin.command: dnf list ansible-automation-platform-installer
+  register: aap_pkg_check
+  changed_when: false
+  failed_when: false
+
+- name: Display AAP package check
+  ansible.builtin.debug:
+    msg: "{{ aap_pkg_check.stdout_lines }}"
+
+- name: Warn if AAP installer not found but continue anyway
+  ansible.builtin.debug:
+    msg: "WARNING: AAP installer package not immediately visible. This may be normal with SCA. Proceeding with installation attempt."
+  when: aap_pkg_check.rc != 0

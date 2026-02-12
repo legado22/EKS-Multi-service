@@ -1,0 +1,8 @@
+---
+aap_firstboot_marker: /var/lib/aap-firstboot-done
+aap_firstboot_log: /var/log/aap-firstboot.log
+aap_build_hostname_file: /var/lib/aap-build-hostname
+aap_setup_dir: /opt/aap-setup
+aap_install_user: aapuser
+aap_admin_password: "changeme"
+aap_pg_password: "aap_pg_secure_default"

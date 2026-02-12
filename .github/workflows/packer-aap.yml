@@ -1,0 +1,138 @@
+name: 'Packer AAP AMI Build'
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'packer/**'
+      - '.github/workflows/packer-aap.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'packer/**'
+      - '.github/workflows/packer-aap.yml'
+  workflow_dispatch:
+    inputs:
+      aap_admin_password:
+        description: 'AAP admin password (overrides default)'
+        required: false
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+  PACKER_VERSION: 1.10.0
+
+jobs:
+  validate:
+    name: 'Packer Validate'
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    defaults:
+      run:
+        working-directory: ./packer
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        with:
+          version: ${{ env.PACKER_VERSION }}
+
+      - name: Install Ansible
+        run: |
+          pip install 'ansible-core>=2.17,<2.18'
+          ansible-galaxy collection install -r ansible/requirements.yml --force
+
+      - name: Packer Init
+        run: packer init .
+
+      - name: Packer Format Check
+        run: packer fmt -check .
+
+      - name: Packer Validate
+        run: |
+          packer validate \
+            -var "rhsm_username=validation@example.com" \
+            -var "rhsm_password=validation-dummy" \
+            .
+
+  build:
+    name: 'Packer Build'
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+
+    permissions:
+      id-token: write
+      contents: read
+
+    defaults:
+      run:
+        working-directory: ./packer
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Packer-AAP
+          role-duration-seconds: 7200
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        with:
+          version: ${{ env.PACKER_VERSION }}
+
+      - name: Install Ansible
+        run: |
+          pip install 'ansible-core>=2.17,<2.18'
+          ansible-galaxy collection install -r ansible/requirements.yml --force
+
+      - name: Packer Init
+        run: packer init .
+
+      - name: Packer Build
+        run: |
+          packer build \
+            -var "rhsm_username=${{ secrets.RHSM_USERNAME }}" \
+            -var "rhsm_password=${{ secrets.RHSM_PASSWORD }}" \
+            -var "aap_admin_password=${{ secrets.AAP_ADMIN_PASSWORD || inputs.aap_admin_password || 'changeme' }}" \
+            -color=false \
+            .
+        timeout-minutes: 120
+
+      - name: Extract AMI ID from manifest
+        id: ami
+        run: |
+          AMI_ID=$(jq -r '.builds[-1].artifact_id | split(":")[1]' packer-manifest.json)
+          echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+          echo "### Packer Build Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "**AMI ID:** \`$AMI_ID\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Region:** ${{ env.AWS_REGION }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Use this AMI in Terraform:" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`hcl" >> "$GITHUB_STEP_SUMMARY"
+          echo "custom_ami_id = \"$AMI_ID\"" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packer-manifest
+          path: packer/packer-manifest.json
+          retention-days: 90
+
+    outputs:
+      ami_id: ${{ steps.ami.outputs.ami_id }}

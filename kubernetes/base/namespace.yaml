@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: execute-tech-academy
+  labels:
+    name: execute-tech-academy
+    environment: production

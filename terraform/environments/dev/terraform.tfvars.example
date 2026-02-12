@@ -1,0 +1,24 @@
+aws_region   = "us-east-1"
+environment  = "dev"
+project_name = "eks-multi-service"
+
+# VPC Configuration
+vpc_cidr = "10.0.0.0/16"
+
+availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+
+public_subnet_cidrs      = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+private_app_subnet_cidrs = ["10.0.10.0/24", "10.0.11.0/24", "10.0.12.0/24"]
+private_db_subnet_cidrs  = ["10.0.20.0/24", "10.0.21.0/24", "10.0.22.0/24"]
+
+# NAT Gateway Configuration
+# Enable NAT Gateway but use single NAT for cost savings in dev (~$32/month vs ~$100/month)
+enable_nat_gateway = true
+single_nat_gateway = true # Use single NAT Gateway for all private subnets
+
+# Disable VPC Flow Logs for dev to save costs
+enable_flow_logs = false
+
+# AAP EC2 Instance - Pre-baked AMI from Packer build
+aap_ami_id   = "ami-XXXXXXXXXXXX"  # Replace with your Packer-built AMI ID
+aap_key_name = "your-ssh-keypair"  # Replace with your EC2 key pair name

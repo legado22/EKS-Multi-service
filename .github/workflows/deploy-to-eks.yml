@@ -1,0 +1,448 @@
+name: 'Deploy to EKS'
+
+on:
+  # Trigger after Docker images are built and pushed
+  workflow_run:
+    workflows: ["Build and Push to ECR"]
+    types:
+      - completed
+    branches:
+      - main
+
+  # Manual deployment trigger
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+      deploy_type:
+        description: 'Deployment type'
+        required: true
+        default: 'rolling'
+        type: choice
+        options:
+          - rolling     # Update existing deployments
+          - fresh       # Delete and recreate all resources
+          - services    # Only update service deployments
+
+  # Allow deployment on push to kubernetes manifests
+  push:
+    branches:
+      - main
+    paths:
+      - 'kubernetes/**'
+      - '.github/workflows/deploy-to-eks.yml'
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER_NAME: eks-multi-service-dev
+  NAMESPACE: execute-tech-academy
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+jobs:
+  deploy:
+    name: 'Deploy to EKS'
+    runs-on: ubuntu-latest
+
+    # Only run if docker build succeeded (when triggered by workflow_run)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    permissions:
+      id-token: write  # Required for OIDC authentication
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-EKS-Deploy
+
+      - name: Verify AWS Identity
+        run: |
+          echo "### 🔐 AWS Identity" >> $GITHUB_STEP_SUMMARY
+          aws sts get-caller-identity | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Configure kubectl
+        run: |
+          echo "### ⚙️ Configuring kubectl for EKS" >> $GITHUB_STEP_SUMMARY
+
+          # Verify cluster is active
+          CLUSTER_STATUS=$(aws eks describe-cluster --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }} --query 'cluster.status' --output text)
+          echo "Cluster status: $CLUSTER_STATUS"
+
+          if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
+            echo "❌ Cluster is not active. Current status: $CLUSTER_STATUS" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          # Configure kubectl
+          aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+          # Wait for cluster endpoint DNS to be resolvable
+          echo "Waiting for cluster endpoint DNS to be resolvable..."
+          CLUSTER_ENDPOINT=$(aws eks describe-cluster --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }} --query 'cluster.endpoint' --output text | sed 's|https://||')
+
+          for i in {1..30}; do
+            if nslookup $CLUSTER_ENDPOINT > /dev/null 2>&1 || host $CLUSTER_ENDPOINT > /dev/null 2>&1 || getent hosts $CLUSTER_ENDPOINT > /dev/null 2>&1; then
+              echo "✓ Cluster endpoint DNS resolved"
+              break
+            fi
+            echo "Waiting for DNS propagation... (attempt $i/30)"
+            sleep 10
+          done
+
+          # Verify connection with retries
+          echo "Verifying kubectl connection..."
+          for i in {1..10}; do
+            if kubectl cluster-info > /dev/null 2>&1; then
+              echo "✓ Successfully connected to cluster"
+              kubectl cluster-info
+              kubectl version --client
+              break
+            fi
+            echo "Retrying connection... (attempt $i/10)"
+            sleep 15
+
+            if [ $i -eq 10 ]; then
+              echo "❌ Failed to connect to cluster after 10 attempts" >> $GITHUB_STEP_SUMMARY
+              kubectl cluster-info 2>&1 || true
+              exit 1
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ kubectl configured successfully" >> $GITHUB_STEP_SUMMARY
+          echo "**Cluster:** ${{ env.CLUSTER_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Namespace:** ${{ env.NAMESPACE }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check Cluster Nodes
+        run: |
+          echo "### 🖥️ Cluster Nodes" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get nodes -o wide >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Process Kubernetes Manifests
+        run: |
+          echo "### 📝 Processing Kubernetes Manifests" >> $GITHUB_STEP_SUMMARY
+
+          cd kubernetes
+          mkdir -p processed
+
+          # Export environment variables for substitution
+          export AWS_ACCOUNT_ID=${{ env.AWS_ACCOUNT_ID }}
+          export AWS_REGION=${{ env.AWS_REGION }}
+
+          # Process each YAML file
+          cd base
+          for file in *.yaml; do
+            echo "Processing $file..."
+            envsubst < "$file" > ../processed/"$file"
+            echo "  ✓ Processed $file" >> $GITHUB_STEP_SUMMARY
+          done
+
+          cd ../processed
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Processed manifests in:** kubernetes/processed/" >> $GITHUB_STEP_SUMMARY
+
+      - name: Deploy Infrastructure (Fresh Deployment)
+        if: github.event.inputs.deploy_type == 'fresh'
+        working-directory: kubernetes/processed
+        run: |
+          echo "### 🗑️ Cleaning existing resources" >> $GITHUB_STEP_SUMMARY
+          kubectl delete namespace ${{ env.NAMESPACE }} --ignore-not-found=true
+
+          # Wait for namespace to be fully deleted
+          kubectl wait --for=delete namespace/${{ env.NAMESPACE }} --timeout=120s || true
+
+          echo "### 🚀 Fresh Deployment" >> $GITHUB_STEP_SUMMARY
+
+          # Deploy in order
+          echo "1️⃣ Creating namespace..."
+          kubectl apply -f namespace.yaml
+
+          echo "2️⃣ Creating ConfigMap and Secrets..."
+          kubectl apply -f configmap.yaml
+          kubectl apply -f secret.yaml
+
+          echo "3️⃣ Deploying PostgreSQL and Redis..."
+          kubectl apply -f postgres.yaml
+          kubectl apply -f redis.yaml
+
+          # Wait for database and cache
+          echo "⏳ Waiting for database and cache..."
+          kubectl wait --for=condition=ready pod -l app=postgres -n ${{ env.NAMESPACE }} --timeout=300s || true
+          kubectl wait --for=condition=ready pod -l app=redis -n ${{ env.NAMESPACE }} --timeout=300s || true
+
+          echo "4️⃣ Deploying microservices..."
+          kubectl apply -f auth-service.yaml
+          kubectl apply -f product-service.yaml
+          kubectl apply -f order-service.yaml
+          kubectl apply -f payment-service.yaml
+
+          # Wait for services
+          echo "⏳ Waiting for services..."
+          kubectl wait --for=condition=ready pod -l app=auth-service -n ${{ env.NAMESPACE }} --timeout=300s || true
+          kubectl wait --for=condition=ready pod -l app=product-service -n ${{ env.NAMESPACE }} --timeout=300s || true
+          kubectl wait --for=condition=ready pod -l app=order-service -n ${{ env.NAMESPACE }} --timeout=300s || true
+          kubectl wait --for=condition=ready pod -l app=payment-service -n ${{ env.NAMESPACE }} --timeout=300s || true
+
+          echo "5️⃣ Deploying API Gateway..."
+          kubectl apply -f api-gateway.yaml
+
+          # Wait for API Gateway
+          echo "⏳ Waiting for API Gateway..."
+          kubectl wait --for=condition=ready pod -l app=api-gateway -n ${{ env.NAMESPACE }} --timeout=300s || true
+
+          echo "✅ Fresh deployment completed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Deploy Services Only
+        if: github.event.inputs.deploy_type == 'services'
+        working-directory: kubernetes/processed
+        run: |
+          echo "### 🔄 Updating Services Only" >> $GITHUB_STEP_SUMMARY
+
+          # Update service deployments
+          kubectl apply -f auth-service.yaml
+          kubectl apply -f product-service.yaml
+          kubectl apply -f order-service.yaml
+          kubectl apply -f payment-service.yaml
+          kubectl apply -f api-gateway.yaml
+
+          echo "✅ Services updated" >> $GITHUB_STEP_SUMMARY
+
+      - name: Rolling Deployment (Default)
+        if: github.event.inputs.deploy_type != 'fresh' && github.event.inputs.deploy_type != 'services' || github.event_name != 'workflow_dispatch'
+        working-directory: kubernetes/processed
+        run: |
+          echo "### 🔄 Rolling Deployment" >> $GITHUB_STEP_SUMMARY
+
+          # Apply all manifests (kubectl will update existing resources)
+          echo "Applying all manifests..."
+          kubectl apply -f namespace.yaml
+          kubectl apply -f configmap.yaml
+          kubectl apply -f secret.yaml
+          kubectl apply -f postgres.yaml
+          kubectl apply -f redis.yaml
+          kubectl apply -f auth-service.yaml
+          kubectl apply -f product-service.yaml
+          kubectl apply -f order-service.yaml
+          kubectl apply -f payment-service.yaml
+          kubectl apply -f api-gateway.yaml
+
+          echo "✅ Rolling deployment completed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Wait for Deployments to be Ready
+        run: |
+          echo "### ⏳ Waiting for deployments to stabilize..." >> $GITHUB_STEP_SUMMARY
+
+          # Wait for all deployments to be ready
+          kubectl wait --for=condition=available deployment --all -n ${{ env.NAMESPACE }} --timeout=600s || true
+
+          echo "✅ Deployments stabilized" >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify Deployment
+        run: |
+          echo "### 📊 Deployment Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Get all resources
+          echo "#### All Resources" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get all -n ${{ env.NAMESPACE }} >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Get pod status
+          echo "#### Pod Status" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n ${{ env.NAMESPACE }} -o wide >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check for failed pods
+          FAILED_PODS=$(kubectl get pods -n ${{ env.NAMESPACE }} --field-selector=status.phase!=Running,status.phase!=Succeeded -o json | jq -r '.items[].metadata.name')
+
+          if [ -n "$FAILED_PODS" ]; then
+            echo "⚠️ **Warning: Some pods are not running**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            for pod in $FAILED_PODS; do
+              echo "#### Logs for $pod" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              kubectl logs $pod -n ${{ env.NAMESPACE }} --tail=50 >> $GITHUB_STEP_SUMMARY 2>&1 || echo "Could not fetch logs"
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+      - name: Get API Gateway URL
+        id: gateway
+        run: |
+          echo "### 🌐 API Gateway Information" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Wait for LoadBalancer to get an external IP
+          echo "⏳ Waiting for LoadBalancer URL..."
+
+          for i in {1..30}; do
+            GATEWAY_URL=$(kubectl get service api-gateway -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+
+            if [ -n "$GATEWAY_URL" ]; then
+              echo "gateway_url=$GATEWAY_URL" >> $GITHUB_OUTPUT
+              echo "**LoadBalancer URL:** http://$GATEWAY_URL:8000" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Health Check:** http://$GATEWAY_URL:8000/health" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "✅ API Gateway is accessible" >> $GITHUB_STEP_SUMMARY
+              break
+            fi
+
+            echo "Waiting for LoadBalancer... (attempt $i/30)"
+            sleep 5
+          done
+
+          if [ -z "$GATEWAY_URL" ]; then
+            echo "⚠️ LoadBalancer URL not yet available. Run:" >> $GITHUB_STEP_SUMMARY
+            echo '```bash' >> $GITHUB_STEP_SUMMARY
+            echo "kubectl get service api-gateway -n ${{ env.NAMESPACE }}" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Test Health Endpoints
+        if: steps.gateway.outputs.gateway_url != ''
+        run: |
+          GATEWAY_URL="${{ steps.gateway.outputs.gateway_url }}"
+
+          echo "### 🏥 Health Check Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Wait a bit for LoadBalancer to be fully operational
+          sleep 30
+
+          # Test API Gateway health
+          echo "Testing API Gateway health endpoint..."
+          if curl -f -s -m 10 "http://$GATEWAY_URL:8000/health" > /dev/null 2>&1; then
+            echo "✅ API Gateway health check passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ API Gateway health check failed (may still be initializing)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Rollout Status
+        run: |
+          echo "### 📈 Deployment Rollout Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl rollout status deployment/auth-service -n ${{ env.NAMESPACE }} >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          kubectl rollout status deployment/product-service -n ${{ env.NAMESPACE }} >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          kubectl rollout status deployment/order-service -n ${{ env.NAMESPACE }} >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          kubectl rollout status deployment/payment-service -n ${{ env.NAMESPACE }} >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          kubectl rollout status deployment/api-gateway -n ${{ env.NAMESPACE }} >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Cluster:** ${{ env.CLUSTER_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Namespace:** ${{ env.NAMESPACE }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Get resource counts
+          TOTAL_PODS=$(kubectl get pods -n ${{ env.NAMESPACE }} --no-headers | wc -l)
+          RUNNING_PODS=$(kubectl get pods -n ${{ env.NAMESPACE }} --field-selector=status.phase=Running --no-headers | wc -l)
+
+          echo "**Pods:** $RUNNING_PODS/$TOTAL_PODS running" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$RUNNING_PODS" -eq "$TOTAL_PODS" ]; then
+            echo "✅ **All pods are running successfully!**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ **Some pods are not running. Check the logs above.**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Notify on Failure
+        if: failure()
+        run: |
+          echo "### ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Recent Events:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get events -n ${{ env.NAMESPACE }} --sort-by='.lastTimestamp' | tail -20 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          exit 1
+
+  # Post-deployment smoke tests (optional)
+  smoke-tests:
+    name: 'Run Smoke Tests'
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Smoke-Tests
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Get API Gateway URL
+        id: gateway
+        run: |
+          GATEWAY_URL=$(kubectl get service api-gateway -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "gateway_url=$GATEWAY_URL" >> $GITHUB_OUTPUT
+
+      - name: Run Basic Smoke Tests
+        if: steps.gateway.outputs.gateway_url != ''
+        run: |
+          GATEWAY_URL="${{ steps.gateway.outputs.gateway_url }}"
+
+          echo "### 🧪 Smoke Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Test API Gateway
+          echo "Testing API Gateway..."
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "http://$GATEWAY_URL:8000/health" || echo "000")
+
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ API Gateway health check: PASSED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ API Gateway health check: FAILED (HTTP $RESPONSE)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Gateway URL:** http://$GATEWAY_URL:8000" >> $GITHUB_STEP_SUMMARY

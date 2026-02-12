@@ -1,0 +1,71 @@
+---
+# Unregister from RHSM to ensure no subscription data in the template
+- name: Unregister from Red Hat Subscription Manager
+  community.general.redhat_subscription:
+    state: absent
+  ignore_errors: true
+
+- name: Remove RHSM cache and configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/rhsm
+    - /etc/pki/consumer
+    - /etc/pki/entitlement
+  ignore_errors: true
+
+- name: Find leftover installer inventory files
+  ansible.builtin.find:
+    paths:
+      - /opt
+      - /root
+      - /home/aapuser
+    patterns:
+      - "inventory"
+      - "*.retry"
+    recurse: true
+  register: sensitive_files
+
+- name: Delete found sensitive files
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ sensitive_files.files }}"
+
+- name: Clear shell histories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /root/.bash_history
+    - /home/aapuser/.bash_history
+
+- name: Truncate system logs
+  ansible.builtin.shell: |
+    truncate -s 0 /var/log/messages || true
+    truncate -s 0 /var/log/secure || true
+    truncate -s 0 /var/log/audit/audit.log || true
+    journalctl --vacuum-time=1s || true
+  ignore_errors: true
+
+- name: Clean temporary file contents (Packer shell provisioner handles final /tmp cleanup)
+  ansible.builtin.shell: |
+    find /tmp -mindepth 1 -not -path '/tmp/ansible*' -delete 2>/dev/null || true
+    find /var/tmp -mindepth 1 -not -path '/var/tmp/ansible*' -delete 2>/dev/null || true
+  ignore_errors: true
+
+- name: Remove SSH host keys (regenerated on first boot)
+  ansible.builtin.shell: rm -f /etc/ssh/ssh_host_*
+  ignore_errors: true
+
+- name: Clean cloud-init if present (may not exist on vSphere builds)
+  ansible.builtin.command: cloud-init clean --logs --seed
+  ignore_errors: true
+  failed_when: false
+
+- name: Remove machine-id for unique identity on clone
+  ansible.builtin.shell: |
+    truncate -s 0 /etc/machine-id
+    rm -f /var/lib/dbus/machine-id
+  ignore_errors: true
