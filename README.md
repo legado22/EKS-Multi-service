@@ -176,7 +176,7 @@ vpc_cidr                       = 10.0.0.0/16
 - Vpc
 
 <details>
-<summary>📥 Input Variables</summary>
+<summary> Input Variables</summary>
 
 | Variable | Type | Description | Default |
 |----------|------|-------------|---------|
@@ -193,7 +193,7 @@ vpc_cidr                       = 10.0.0.0/16
 </details>
 
 <details>
-<summary>📤 Outputs</summary>
+<summary> Outputs</summary>
 
 | Output | Description |
 |--------|-------------|
@@ -237,7 +237,7 @@ vpc_cidr                       = 10.0.0.0/16
 </details>
 
 <details>
-<summary>📤 Outputs</summary>
+<summary> Outputs</summary>
 
 | Output | Description |
 |--------|-------------|
